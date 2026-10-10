@@ -11,6 +11,9 @@ import AccountTrips from '../components/AccountTrips'
 import type { AirportRow, Division } from '../lib/types'
 import { num } from '../lib/format'
 import { useCarrierCount } from '../lib/carriers'
+import { useDivisions } from '../lib/data'
+
+const NO_DIVISIONS: Division[] = []
 
 /**
  * Resonance: sign in, keep a profile, and see every trip on the account.
@@ -24,19 +27,12 @@ export default function Resonance() {
   const carrierCount = useCarrierCount()
   const { ready, user, resonant, recovering, endRecovery, signOut, refreshResonant } = useAuth()
   const [error, setError] = useState<string | null>(null)
-  const [divisions, setDivisions] = useState<Division[]>([])
+  // Only once there is an account to show them to, as before.
+  const divisions = useDivisions(!!resonant) ?? NO_DIVISIONS
   const [airportQuery, setAirportQuery] = useState('')
   const [airportHits, setAirportHits] = useState<AirportRow[]>([])
   const [saved, setSaved] = useState(false)
   const [showAdminModal, setShowAdminModal] = useState(false)
-
-  useEffect(() => {
-    if (!isConfigured || !resonant) return
-    void (async () => {
-      const d = await supabase.from('v_division_summary').select('*').order('sort_order')
-      setDivisions((d.data as Division[]) ?? [])
-    })()
-  }, [resonant])
 
   useEffect(() => {
     if (airportQuery.length < 2) {

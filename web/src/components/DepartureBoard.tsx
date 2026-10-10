@@ -4,6 +4,7 @@ import SplitFlap, { toFlap } from './SplitFlap'
 import { Loading } from './ui'
 import type { BoardRow } from './SplitFlap'
 import { isConfigured, supabase } from '../lib/supabase'
+import { useHubs, type Hub } from '../lib/data'
 import type { BoardDeparture } from '../lib/types'
 
 /**
@@ -109,15 +110,28 @@ function WallClock({ tz }: { tz?: string | null }) {
   return <span className="tabular-nums">{fmt.format(now)}</span>
 }
 
-type Hub = { iata_code: string; city_name: string | null; airport_name: string | null }
+const NO_HUBS: Hub[] = []
+
+/** The last board read for each origin, for as long as it is still current. */
+const lastBoards = new Map<string | null, { at: number; rows: BoardDeparture[] }>()
+
+function recentBoard(pick: string | null): BoardDeparture[] | null {
+  const last = lastBoards.get(pick)
+  return last && Date.now() - last.at < REFETCH_MS ? last.rows : null
+}
 
 export default function DepartureBoard({ origin }: { origin?: string }) {
-  const [departures, setDepartures] = useState<BoardDeparture[]>([])
-  const [hubs, setHubs] = useState<Hub[]>([])
   // null means "the alliance's busiest airport" -- NOT "wherever you are".
   const [pick, setPick] = useState<string | null>(origin ?? null)
+  // A board read within the last minute is still the board: coming back to
+  // Home opens on it instead of on the loader, and the read below replaces it.
+  const [departures, setDepartures] = useState<BoardDeparture[]>(() => recentBoard(pick) ?? [])
+  // The alliance's busiest airports, so the board is not stuck on whichever
+  // one happens to share the viewer's clock. They do not move; shared and
+  // kept across visits by lib/data.ts.
+  const hubs = useHubs() ?? NO_HUBS
   const [now, setNow] = useState(() => Date.now())
-  const [loaded, setLoaded] = useState(false)
+  const [loaded, setLoaded] = useState(() => recentBoard(pick) !== null)
   /** What has been typed into the "any airport" box. */
   const [typed, setTyped] = useState('')
 
@@ -131,7 +145,11 @@ export default function DepartureBoard({ origin }: { origin?: string }) {
       // a location inference for a board nobody had asked to personalise.
       p_viewer_tz: null,
     })
-    if (!error) setDepartures((data as BoardDeparture[]) ?? [])
+    if (!error) {
+      const list = (data as BoardDeparture[]) ?? []
+      lastBoards.set(pick, { at: Date.now(), rows: list })
+      setDepartures(list)
+    }
     setLoaded(true)
     setNow(Date.now())
   }, [pick])
@@ -151,20 +169,6 @@ export default function DepartureBoard({ origin }: { origin?: string }) {
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [load])
-
-  // The alliance's busiest airports, so the board is not stuck on whichever
-  // one happens to share the viewer's clock. Fetched once; they do not move.
-  useEffect(() => {
-    if (!isConfigured) return
-    void (async () => {
-      const { data } = await supabase
-        .from('mv_airport_directory')
-        .select('iata_code, city_name, airport_name')
-        .order('weekly_departures', { ascending: false })
-        .limit(6)
-      setHubs((data as Hub[]) ?? [])
-    })()
-  }, [])
 
   // The countdowns, between fetches.
   useEffect(() => {

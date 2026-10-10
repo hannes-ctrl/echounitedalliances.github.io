@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { isConfigured, supabase } from '../lib/supabase'
-import type { Division } from '../lib/types'
+import { isConfigured } from '../lib/supabase'
+import { useDivisions } from '../lib/data'
 import { accentOf, capitalise, num, spell } from '../lib/format'
 import { useDivisionCount } from '../lib/carriers'
 import { DIVISION_NOTES } from '../lib/site'
@@ -19,17 +18,10 @@ import EchoMark from '../components/EchoMark'
  * order is group policy, held in sort_order by 16_division_policy.sql.
  */
 export default function Divisions() {
-  const [rows, setRows] = useState<Division[] | null>(null)
+  // Shared with Home and kept across visits (lib/data.ts), so this page is
+  // usually drawn from what is already held rather than from a fresh read.
+  const rows = useDivisions() ?? null
   const divisionCount = useDivisionCount()
-
-  useEffect(() => {
-    if (!isConfigured) return
-    void supabase
-      .from('v_division_summary')
-      .select('*')
-      .order('sort_order')
-      .then(({ data }) => setRows((data as Division[]) ?? []))
-  }, [])
 
   if (!isConfigured) return <NotConfigured />
 

@@ -1,26 +1,14 @@
 import { useEffect, useState } from 'react'
 import { HashRouter, Link, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import Home from './pages/Home'
-import About from './pages/About'
-import Activities from './pages/Activities'
-import Divisions from './pages/Divisions'
-import DivisionPage from './pages/Division'
-import AirlinePage from './pages/Airline'
-import Directory from './pages/Directory'
-import AirportPage from './pages/Airport'
-import SearchResults from './pages/SearchResults'
-import Book from './pages/Book'
-import Trips from './pages/Trips'
-import NetworkPage from './pages/Network'
+import { PAGE_NAMES, arrivedPage, loadPage, type PageName } from './pages'
+import { warmUp } from './lib/warmup'
+import { Loading } from './components/ui'
 import { MAINTENANCE_LOCK_UNTIL, SITE, discordConfigured } from './lib/site'
 import { useOnlineCount } from './lib/discordWidget'
 import { useSiteVisitorCount } from './lib/presence'
 import { num } from './lib/format'
 import { useAirportCount, useCarrierCount, useDivisionCount } from './lib/carriers'
-import Resonance from './pages/Resonance'
-import { Conduct, Privacy, Terms } from './pages/Policy'
-import News from './pages/News'
-import RoundTheWorld from './pages/RoundTheWorld'
 import { AuthProvider, useAuth } from './lib/auth'
 import AdvisoryBar from './components/AdvisoryBar'
 import NavGroup from './components/NavGroup'
@@ -35,6 +23,66 @@ import MaintenanceLock from './components/MaintenanceLock'
  * paths back to index.html, so a deep link like /d/kyra/emirates would 404 on
  * refresh. The hash keeps every route client-side.
  */
+
+/**
+ * Home is in the first script; every other page is its own file.
+ *
+ * The site shipped as one 751 kB script (220 kB over the wire), so a visitor
+ * reading the front page had also downloaded and parsed the booking flow, the
+ * admin screens and three policy documents before anything was drawn. Each
+ * page is now fetched when it is first needed -- which in practice is while
+ * the welcome plays: lib/warmup.ts asks for all of them as soon as the page on
+ * screen has finished its own reading, and index.html and main.tsx ask for
+ * the one in the address bar straight away. See pages/index.ts.
+ *
+ * Not React.lazy. Once a Suspense fallback has been shown React holds the
+ * real content back for 300 ms so that spinners do not flicker, which put
+ * 300 ms on every deep link (measured: the directory at 620 ms against 300).
+ * This draws the page in the same render if its file is here, and in the
+ * render after it arrives if not, with nothing in between.
+ */
+function page<N extends PageName>(
+  name: N,
+  pick: (module: NonNullable<ReturnType<typeof arrivedPage<N>>>) => React.ComponentType,
+) {
+  return function Page() {
+    const [, arrive] = useState(0)
+    const module = arrivedPage(name)
+    useEffect(() => {
+      if (module) return
+      let cancelled = false
+      void loadPage(name).then(() => {
+        if (!cancelled) arrive((n) => n + 1)
+      })
+      return () => {
+        cancelled = true
+      }
+    }, [module])
+    // Seen only if a page is opened before its file has arrived, which takes
+    // clicking through the welcome on a slow connection.
+    if (!module) return <div className="min-h-[60vh]"><Loading /></div>
+    const Component = pick(module)
+    return <Component />
+  }
+}
+
+const About = page('about', (m) => m.default)
+const Activities = page('activities', (m) => m.default)
+const Divisions = page('divisions', (m) => m.default)
+const DivisionPage = page('division', (m) => m.default)
+const AirlinePage = page('airline', (m) => m.default)
+const Directory = page('directory', (m) => m.default)
+const AirportPage = page('airport', (m) => m.default)
+const SearchResults = page('search', (m) => m.default)
+const Book = page('book', (m) => m.default)
+const Trips = page('trips', (m) => m.default)
+const NetworkPage = page('network', (m) => m.default)
+const Resonance = page('resonance', (m) => m.default)
+const News = page('news', (m) => m.default)
+const RoundTheWorld = page('rtw', (m) => m.default)
+const Terms = page('policy', (m) => m.Terms)
+const Conduct = page('policy', (m) => m.Conduct)
+const Privacy = page('policy', (m) => m.Privacy)
 
 
 /** The live count from Discord's public widget. Renders nothing until it loads. */
@@ -126,6 +174,8 @@ function Shell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation()
   // Following a link should close the menu, or the next page opens behind it.
   useEffect(() => setOpen(false), [pathname])
+  // Once, after the first page is up: read ahead while the welcome plays.
+  useEffect(() => warmUp(PAGE_NAMES.map((name) => () => loadPage(name))), [])
 
   return (
     <div className="min-h-screen">

@@ -1,21 +1,32 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import RouteMap from '../components/RouteMap'
 import { Loading, NotConfigured } from '../components/ui'
 import Pager, { usePaged } from '../components/Pager'
 import { isConfigured, supabase } from '../lib/supabase'
+import { useBusiestAirports, useDivisions, useNetworkArcs, useNetworkNodes } from '../lib/data'
 import type { AirportRoute, AirportRow, Arc, Division, NetworkNode } from '../lib/types'
 import { accentOf, num } from '../lib/format'
 
+const NO_ARCS: Arc[] = []
+const NO_NODES: NetworkNode[] = []
+const NO_DIVISIONS: Division[] = []
+const NO_AIRPORTS: AirportRow[] = []
+
 /** The whole alliance drawn at once, with the busiest airports beside it. */
 export default function NetworkPage() {
-  const [arcs, setArcs] = useState<Arc[]>([])
-  const [nodes, setNodes] = useState<NetworkNode[]>([])
-  const [divisions, setDivisions] = useState<Division[]>([])
-  const [busiest, setBusiest] = useState<AirportRow[]>([])
+  // Four reads, each drawn when it lands. They used to share one Promise.all,
+  // so the map -- two quick materialised views -- stayed behind a spinner
+  // until v_division_summary had answered, which it does seconds later.
+  const arcsHeld = useNetworkArcs(1300)
+  const nodesHeld = useNetworkNodes(900)
+  const arcs = arcsHeld ?? NO_ARCS
+  const nodes = nodesHeld ?? NO_NODES
+  const divisions = useDivisions() ?? NO_DIVISIONS
+  const busiest = useBusiestAirports() ?? NO_AIRPORTS
   const busiestPage = usePaged(busiest)
   const [focus, setFocus] = useState<string | null>(null)
-  const [ready, setReady] = useState(false)
+  const ready = arcsHeld !== undefined && nodesHeld !== undefined
   // When an airport is picked the map zooms to it and shows only what it
   // reaches, each route coloured by whichever division flies it most.
   const [pinned, setPinned] = useState<string | null>(null)
@@ -40,32 +51,6 @@ export default function NetworkPage() {
       })),
     )
   }
-
-  useEffect(() => {
-    if (!isConfigured) return
-    void (async () => {
-      const [a, n, d, b] = await Promise.all([
-        supabase
-          .from('mv_network_arcs')
-          .select('*')
-          .order('featured', { ascending: false })
-          .order('weekly_departures', { ascending: false })
-          .limit(1300),
-        supabase.from('mv_network_nodes').select('*').limit(900),
-        supabase.from('v_division_summary').select('*').order('sort_order'),
-        supabase
-          .from('mv_airport_directory')
-          .select('*')
-          .order('weekly_departures', { ascending: false })
-          .limit(25),
-      ])
-      setArcs((a.data as Arc[]) ?? [])
-      setNodes((n.data as NetworkNode[]) ?? [])
-      setDivisions((d.data as Division[]) ?? [])
-      setBusiest((b.data as AirportRow[]) ?? [])
-      setReady(true)
-    })()
-  }, [])
 
   if (!isConfigured) return <NotConfigured />
 

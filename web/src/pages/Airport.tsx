@@ -3,8 +3,12 @@ import { Link, useParams } from 'react-router-dom'
 import { Loading, NotConfigured } from '../components/ui'
 import Pager, { usePaged } from '../components/Pager'
 import { isConfigured, supabase } from '../lib/supabase'
+import { load, peek } from '../lib/cache'
+import { rows } from '../lib/data'
 import type { AirportRow } from '../lib/types'
 import { flag, num } from '../lib/format'
+
+const KEPT = { fresh: 10 * 60 * 1000 }
 
 type Carrier = {
   uid: string
@@ -29,16 +33,38 @@ export default function AirportPage() {
 
   useEffect(() => {
     if (!isConfigured) return
-    setAirport(null)
-    setCarriers(null)
-    void (async () => {
-      const [a, c] = await Promise.all([
-        supabase.from('mv_airport_directory').select('*').eq('iata_code', iata.toUpperCase()).maybeSingle(),
-        supabase.rpc('airport_carriers', { p_iata: iata.toUpperCase() }),
-      ])
-      setAirport((a.data as AirportRow) ?? null)
-      setCarriers((c.data as Carrier[]) ?? [])
-    })()
+    let cancelled = false
+    const code = iata.toUpperCase()
+    setAirport(peek<AirportRow | null>(`airport:${code}`) ?? null)
+    setCarriers(peek<Carrier[]>(`airport:carriers:${code}`) ?? null)
+    // Two reads, each drawn when it lands. They used to share one Promise.all:
+    // the airport is a single row of a materialised view and answers in a
+    // tenth of a second, and airport_carriers took 2 to 7 seconds for Heathrow
+    // on 10 October 2026 -- with the whole page a spinner until it had.
+    load(
+      `airport:${code}`,
+      () =>
+        rows<AirportRow | null>(
+          supabase.from('mv_airport_directory').select('*').eq('iata_code', code).maybeSingle(),
+        ),
+      KEPT,
+    )
+      .catch(() => null)
+      .then((row) => {
+        if (!cancelled) setAirport(row)
+      })
+    load(
+      `airport:carriers:${code}`,
+      () => rows<Carrier[]>(supabase.rpc('airport_carriers', { p_iata: code })).then((list) => list ?? []),
+      KEPT,
+    )
+      .catch(() => [] as Carrier[])
+      .then((list) => {
+        if (!cancelled) setCarriers(list)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [iata])
 
   if (!isConfigured) return <NotConfigured />

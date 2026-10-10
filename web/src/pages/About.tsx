@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { isConfigured, supabase } from '../lib/supabase'
-import type { Division } from '../lib/types'
+import { isConfigured } from '../lib/supabase'
+import { useDivisions } from '../lib/data'
 import { LEADERS, SLOGAN, STORY } from '../lib/alliance'
 import { accentOf, num, spell } from '../lib/format'
 import { useDivisionCount } from '../lib/carriers'
@@ -20,25 +19,13 @@ import EchoMark from '../components/EchoMark'
  * slogan, the division leaders, and the size of the thing they run.
  */
 export default function About() {
-  const [divisions, setDivisions] = useState<Division[] | null>(null)
+  // A failed read is not an empty group. Treated as one, this page reported
+  // every leader as "not a division on record" while the weekly refresh held
+  // the tables (2 October 2026). The shared read in lib/data.ts tries twice
+  // and never answers an error with an empty list: this stays null, and the
+  // page stays loading.
+  const divisions = useDivisions() ?? null
   const divisionCount = useDivisionCount()
-
-  useEffect(() => {
-    if (!isConfigured) return
-    void supabase
-      .from('v_division_summary')
-      .select('*')
-      .order('sort_order')
-      // A failed read is not an empty group. Treated as one, it reported every
-      // leader as "not a division on record" while the weekly refresh held the
-      // tables (2 October 2026). On error, stay loading and try once more.
-      .then(async ({ data, error }) => {
-        if (!error && data) return setDivisions(data as Division[])
-        await new Promise((r) => setTimeout(r, 4000))
-        const retry = await supabase.from('v_division_summary').select('*').order('sort_order')
-        if (!retry.error && retry.data) setDivisions(retry.data as Division[])
-      })
-  }, [])
 
   if (!isConfigured) return <NotConfigured />
 

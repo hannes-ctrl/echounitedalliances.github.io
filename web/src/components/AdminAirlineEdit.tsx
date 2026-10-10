@@ -1,8 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import Modal from './Modal'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import { forgetDivisions, useDivisions } from '../lib/data'
 import type { Airline, Division } from '../lib/types'
+
+const NO_DIVISIONS: Division[] = []
 
 /**
  * What an admin can change about a carrier: what it is called, the paragraph
@@ -39,23 +42,12 @@ export default function AdminAirlineEdit({
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [division, setDivision] = useState('')
-  const [divisions, setDivisions] = useState<Division[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [moved, setMoved] = useState<string | null>(null)
 
   const isAdmin = resonant?.is_admin ?? false
-
-  useEffect(() => {
-    if (!isAdmin || !open || divisions.length > 0) return
-    void (async () => {
-      const { data } = await supabase
-        .from('v_division_summary')
-        .select('*')
-        .order('sort_order')
-      setDivisions((data as Division[]) ?? [])
-    })()
-  }, [isAdmin, open, divisions.length])
+  const divisions = useDivisions(isAdmin && open) ?? NO_DIVISIONS
 
   // Hooks above every return, always.
   if (!isAdmin) return null
@@ -112,7 +104,12 @@ export default function AdminAirlineEdit({
       // A move is worth a word before the modal goes away: the map will not
       // agree yet, and finding that out by noticing is a worse experience
       // than being told.
-      if (movingTo) setMoved(updated.division_name)
+      if (movingTo) {
+        setMoved(updated.division_name)
+        // Two divisions' carrier counts just changed, and the summary is kept
+        // across pages now: drop it so the next reader asks again.
+        forgetDivisions()
+      }
       else setOpen(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The change could not be saved.')

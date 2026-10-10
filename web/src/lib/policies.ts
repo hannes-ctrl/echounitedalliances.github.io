@@ -220,9 +220,10 @@ export const PRIVACY: Policy = {
     {
       heading: 'What your browser stores',
       body: [
-        'No advertising or analytics trackers, and no third-party cookies. Two things are kept in your browser\'s own storage, on your device:',
+        'No advertising or analytics trackers, and no third-party cookies. Three things are kept in your browser\'s own storage, on your device:',
       ],
       list: [
+        'A copy of public alliance figures the site has already shown you — the division totals, the network map and the headline counts — so the next visit opens on them instead of waiting for the database. It is the same for every visitor and says nothing about you.',
         'Which travel advisories you have dismissed, so a notice you have already read does not reappear on every visit.',
         'Your sign-in session, if you have a Resonance account, so you are not asked to sign in on every page.',
       ],

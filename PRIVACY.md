@@ -74,6 +74,11 @@ so you aren't asked to sign in on every page. It contains no personal data
 beyond what's needed to keep you signed in, and it's cleared when you sign
 out.
 
+The site also keeps a copy of public alliance figures it has already shown
+you — the division totals, the network map and the headline counts — so
+the next visit opens on them instead of waiting for the database. That copy
+is the same for every visitor and says nothing about you.
+
 ## Children
 
 This site and the alliance are not intended for anyone under 13, matching

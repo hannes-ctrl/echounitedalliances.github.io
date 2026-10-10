@@ -3,35 +3,39 @@ import { Link, useParams } from 'react-router-dom'
 import RouteMap from '../components/RouteMap'
 import EchoMark from '../components/EchoMark'
 import { AirlineCard, Loading, NotConfigured } from '../components/ui'
-import { isConfigured, supabase } from '../lib/supabase'
-import type { Airline, Arc, Division, NetworkNode } from '../lib/types'
+import { isConfigured } from '../lib/supabase'
+import { heldAirlines, searchAirlines, useDivision, useNetworkArcs, useNetworkNodes } from '../lib/data'
+import type { Airline, Arc, NetworkNode } from '../lib/types'
 import { accentOf, num } from '../lib/format'
+
+const NO_ARCS: Arc[] = []
+const NO_NODES: NetworkNode[] = []
 
 export default function DivisionPage() {
   const { code = '' } = useParams()
-  const [division, setDivision] = useState<Division | null>(null)
-  const [members, setMembers] = useState<Airline[] | null>(null)
-  const [arcs, setArcs] = useState<Arc[]>([])
-  const [nodes, setNodes] = useState<NetworkNode[]>([])
+  // The division itself comes out of the list Home and the divisions page
+  // already hold, so arriving from either opens the header at once; the
+  // members, the arcs and the nodes each land on their own behind it.
+  const division = useDivision(code) ?? null
+  const search = useMemo(() => ({ division: code, limit: 300 }), [code])
+  const [members, setMembers] = useState<Airline[] | null>(() => heldAirlines(search) ?? null)
+  const arcs = useNetworkArcs(900, 'busiest') ?? NO_ARCS
+  const nodes = useNetworkNodes(600) ?? NO_NODES
   const [sort, setSort] = useState<'prominence' | 'name' | 'fleet'>('prominence')
 
   useEffect(() => {
     if (!isConfigured) return
-    setDivision(null)
-    setMembers(null)
-    void (async () => {
-      const [d, m, a, n] = await Promise.all([
-        supabase.from('v_division_summary').select('*').eq('division_code', code).maybeSingle(),
-        supabase.rpc('search_airlines', { p_division: code, p_limit: 300, p_offset: 0 }),
-        supabase.from('mv_network_arcs').select('*').order('weekly_departures', { ascending: false }).limit(900),
-        supabase.from('mv_network_nodes').select('*').limit(600),
-      ])
-      setDivision((d.data as Division) ?? null)
-      setMembers((m.data as Airline[]) ?? [])
-      setArcs((a.data as Arc[]) ?? [])
-      setNodes((n.data as NetworkNode[]) ?? [])
-    })()
-  }, [code])
+    let cancelled = false
+    setMembers(heldAirlines(search) ?? null)
+    searchAirlines(search)
+      .catch(() => [] as Airline[])
+      .then((list) => {
+        if (!cancelled) setMembers(list)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [search])
 
   const sorted = useMemo(() => {
     if (!members) return null

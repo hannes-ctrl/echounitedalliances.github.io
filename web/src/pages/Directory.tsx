@@ -2,36 +2,35 @@ import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { AirlineCard, Loading, NotConfigured } from '../components/ui'
 import CountryField from '../components/CountryField'
-import { isConfigured, supabase } from '../lib/supabase'
+import { isConfigured } from '../lib/supabase'
+import { DIRECTORY_PAGE, heldAirlines, searchAirlines, useDivisions } from '../lib/data'
 import type { Airline, Division } from '../lib/types'
 import { accentOf, num, spell } from '../lib/format'
 import { useCarrierCount, useDivisionCount } from '../lib/carriers'
 
-const PAGE = 60
+const PAGE = DIRECTORY_PAGE
+const NO_DIVISIONS: Division[] = []
 
 /** Every carrier, filterable. The heavy lifting is search_airlines(). */
 export default function Directory() {
   const carrierCount = useCarrierCount()
   const divisionCount = useDivisionCount()
   const [params, setParams] = useSearchParams()
-  const [divisions, setDivisions] = useState<Division[]>([])
-  const [rows, setRows] = useState<Airline[] | null>(null)
-  const [more, setMore] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const divisions = useDivisions() ?? NO_DIVISIONS
 
   const q = params.get('q') ?? ''
   const division = params.get('division') ?? ''
   const country = params.get('country') ?? ''
   const [draft, setDraft] = useState(q)
 
-  useEffect(() => {
-    if (!isConfigured) return
-    void supabase
-      .from('v_division_summary')
-      .select('*')
-      .order('sort_order')
-      .then(({ data }) => setDivisions((data as Division[]) ?? []))
-  }, [])
+  // A page of results already read -- the opening page is read ahead while the
+  // welcome plays, and any search is kept for ten minutes -- is drawn on the
+  // first render, so Back from a carrier lands on the list and not a spinner.
+  const [rows, setRows] = useState<Airline[] | null>(
+    () => heldAirlines({ q, division, country, limit: PAGE }) ?? null,
+  )
+  const [more, setMore] = useState(() => rows?.length === PAGE)
+  const [busy, setBusy] = useState(false)
 
   // The box follows the URL when the URL changes from anywhere else -- the
   // Back button, or Clear all. Without this the input keeps text the user has
@@ -70,34 +69,28 @@ export default function Directory() {
   useEffect(() => {
     if (!isConfigured) return
     let cancelled = false
-    setRows(null)
-    void (async () => {
-      const { data } = await supabase.rpc('search_airlines', {
-        p_query: q || null,
-        p_division: division || null,
-        p_country: country || null,
-        p_limit: PAGE,
-        p_offset: 0,
+    const search = { q, division, country, limit: PAGE }
+    const held = heldAirlines(search) ?? null
+    setRows(held)
+    if (held) setMore(held.length === PAGE)
+    searchAirlines(search)
+      .catch(() => [] as Airline[])
+      .then((list) => {
+        if (cancelled) return
+        // Unchanged, and the visitor may have paged further since: leave it.
+        if (list === held) return
+        setRows(list)
+        setMore(list.length === PAGE)
       })
-      if (cancelled) return
-      const list = (data as Airline[]) ?? []
-      setRows(list)
-      setMore(list.length === PAGE)
-    })()
     return () => { cancelled = true }
   }, [q, division, country])
 
   const loadMore = async () => {
     if (!rows || busy) return
     setBusy(true)
-    const { data } = await supabase.rpc('search_airlines', {
-      p_query: q || null,
-      p_division: division || null,
-      p_country: country || null,
-      p_limit: PAGE,
-      p_offset: rows.length,
-    })
-    const list = (data as Airline[]) ?? []
+    const list = await searchAirlines({ q, division, country, limit: PAGE, offset: rows.length }).catch(
+      () => [] as Airline[],
+    )
     setRows([...rows, ...list])
     setMore(list.length === PAGE)
     setBusy(false)

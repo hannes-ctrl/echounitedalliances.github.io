@@ -7,6 +7,17 @@ import RouteMap from '../components/RouteMap'
 import { Loading, Mark, NotConfigured } from '../components/ui'
 import Pager, { usePaged } from '../components/Pager'
 import { isConfigured, supabase } from '../lib/supabase'
+import { load, put, useHeld } from '../lib/cache'
+import { rows as read } from '../lib/data'
+import {
+  carrierKeys,
+  heavyTurn,
+  loadTimetable,
+  openCarrier,
+  readProfile,
+  type CarrierMap,
+  type IdleRoute,
+} from '../lib/carrierPage'
 import type {
   Airline,
   Arc,
@@ -20,23 +31,44 @@ import { accentOf, duration, flag, num, usd } from '../lib/format'
 
 const DAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
 
+// One array each for "nothing yet", not a new one per render: usePaged and the
+// map both take a changed array to mean changed rows.
+const NO_FLEET: FleetRow[] = []
+const NO_ROUTES: RoutePairRow[] = []
+const NO_IDLE: IdleRoute[] = []
+const NO_TIMETABLE: TimetableRow[] = []
+const NO_MAP: CarrierMap = { arcs: [], nodes: [] }
+
+type DivisionMap = { arcs: Arc[]; nodes: NetworkNode[] }
+
 export default function AirlinePage() {
   const { code = '', slug = '' } = useParams()
-  const [a, setA] = useState<Airline | null>(null)
-  const [fleet, setFleet] = useState<FleetRow[]>([])
-  const [routes, setRoutes] = useState<RoutePairRow[]>([])
+
+  /**
+   * The carrier arrives in pieces, each drawn as it lands -- lib/carrierPage.ts
+   * says which, in what order, and why. This page starts the reading and then
+   * only watches what is held: on a carrier opened a moment ago, or one whose
+   * card the pointer rested on, every piece below is there on the first render.
+   */
+  const row = useHeld<Airline | null>(isConfigured ? carrierKeys.row(code, slug) : null)
+  const uid = row?.uid ?? null
+  // The same row from v_airline_profile, a second or so behind: it carries the
+  // paragraph, and it is what an admin's edit is read back into.
+  const profile = useHeld<Airline | null>(uid && carrierKeys.profile(uid))
+  const a = profile ?? row ?? null
+  const fleetHeld = useHeld<FleetRow[]>(uid && carrierKeys.fleet(uid))
+  const routesHeld = useHeld<RoutePairRow[]>(uid && carrierKeys.routes(uid))
+  const fleet = fleetHeld ?? NO_FLEET
+  const routes = routesHeld ?? NO_ROUTES
+  /** The member-built website covering this carrier, if there is one. */
+  const site = useHeld<MemberSiteRow | null>(uid && carrierKeys.site(uid)) ?? null
   // City pairs it holds with nothing to sell: opened in the game with no
   // flights, or flights with no aircraft. The game counts them as routes.
-  const [idleRoutes, setIdleRoutes] = useState<{ airport_a: string; airport_b: string; reason: string }[]>([])
-  const [arcs, setArcs] = useState<Arc[]>([])
-  const [nodes, setNodes] = useState<NetworkNode[]>([])
-  const [missing, setMissing] = useState(false)
-  /** The member-built website covering this carrier, if there is one. */
-  const [site, setSite] = useState<MemberSiteRow | null>(null)
-  const [timetable, setTimetable] = useState<TimetableRow[] | null>(null)
+  const idleRoutes = useHeld<IdleRoute[]>(uid && carrierKeys.idle(uid)) ?? NO_IDLE
+  const { arcs, nodes } = useHeld<CarrierMap>(uid && carrierKeys.map(uid)) ?? NO_MAP
+  /** The read for the row itself failed, which is not the same as no such carrier. */
+  const [failed, setFailed] = useState<string | null>(null)
   const [ttAirport, setTtAirport] = useState<string>('')
-  /** True when the unfiltered timetable came back at the server's row cap. */
-  const [ttCapped, setTtCapped] = useState(false)
 
   /**
    * The map answers two different questions and they need different data.
@@ -47,117 +79,17 @@ export default function AirlinePage() {
    * once on demand rather than on every page load.
    */
   const [mapMode, setMapMode] = useState<'airline' | 'division'>('airline')
-  const [divArcs, setDivArcs] = useState<Arc[] | null>(null)
-  const [divNodes, setDivNodes] = useState<NetworkNode[]>([])
   const [divLoading, setDivLoading] = useState(false)
   /** Which route the timetable is pinned to, if any. */
   const [ttRoute, setTtRoute] = useState<{ a: string; b: string } | null>(null)
   const timetableRef = useRef<HTMLElement>(null)
 
-  // Up here with the other hooks on purpose. This component returns early
-  // twice below -- not configured, and still loading -- so a hook called
-  // further down runs on some renders and not others, which is exactly the
-  // "rendered more hooks than during the previous render" crash.
-  const fleetPage = usePaged(fleet)
-  const routePage = usePaged(routes)
-  const timetablePage = usePaged(timetable ?? [])
+  const divisionCode = a?.division_code ?? null
+  const divKey = mapMode === 'division' && divisionCode ? `division:arcs:${divisionCode}` : null
+  const divMap = useHeld<DivisionMap>(divKey)
+  const divArcs = divMap?.arcs ?? null
+  const divNodes = divMap?.nodes ?? NO_MAP.nodes
 
-  useEffect(() => {
-    if (!isConfigured) return
-    setA(null)
-    setMissing(false)
-    setSite(null)
-    setMapMode('airline')
-    setDivArcs(null)
-    setDivNodes([])
-    setTtAirport('')
-    setTtRoute(null)
-    void (async () => {
-      const { data } = await supabase
-        .from('v_airline_profile')
-        .select('*')
-        .eq('division_code', code)
-        .eq('airline_slug', slug)
-        .maybeSingle()
-      const air = data as Airline | null
-      if (!air) {
-        setMissing(true)
-        return
-      }
-      setA(air)
-
-      const [f, r, w, idle] = await Promise.all([
-        supabase
-          .from('v_fleet')
-          .select('aircraft_model, manufacturer, aircraft_count')
-          .eq('airline_uid', air.uid)
-          .order('aircraft_count', { ascending: false }),
-        // v_route_pairs, not v_routes: the latter is one row per direction, so
-        // the table showed every route twice with half its departures each.
-        // Folding the pair in SQL also means this top-400 is the right 400.
-        supabase
-          .from('v_route_pairs')
-          .select('airport_a, airport_b, departures_per_week, directions, sole_origin, fastest_minutes, cheapest_economy_usd')
-          .eq('airline_uid', air.uid)
-          .order('departures_per_week', { ascending: false })
-          .limit(400),
-        // Most carriers have no site of their own, so this returns no rows
-        // far more often than it returns one.
-        supabase.rpc('airline_site', { p_uid: air.uid }),
-        supabase
-          .from('v_airline_idle_routes')
-          .select('airport_a, airport_b, reason')
-          .eq('airline_uid', air.uid)
-          .order('airport_a')
-          .order('airport_b'),
-      ])
-      const routeRows = (r.data as RoutePairRow[]) ?? []
-      setFleet((f.data as FleetRow[]) ?? [])
-      setRoutes(routeRows)
-      setSite(((w.data as MemberSiteRow[]) ?? [])[0] ?? null)
-      setIdleRoutes((idle.data as { airport_a: string; airport_b: string; reason: string }[]) ?? [])
-
-      // Draw this carrier's own network: look up the coordinates for the
-      // airports it actually touches, then build arcs from its routes.
-      const codes = Array.from(
-        new Set(routeRows.flatMap((x) => [x.airport_a, x.airport_b])),
-      ).slice(0, 400)
-      if (codes.length) {
-        const { data: pts } = await supabase
-          .from('mv_airport_directory')
-          .select('iata_code, city_name, country_code, latitude, longitude, weekly_departures, carriers, hub_for')
-          .in('iata_code', codes)
-        const byCode = new Map(
-          ((pts as NetworkNode[]) ?? []).map((p) => [p.iata_code, p]),
-        )
-        setNodes(Array.from(byCode.values()).filter((p) => p.latitude != null))
-        const accent = accentOf(air)
-        setArcs(
-          routeRows
-            .map((x) => {
-              const o = byCode.get(x.airport_a)
-              const d = byCode.get(x.airport_b)
-              if (!o || !d || o.latitude == null || d.latitude == null) return null
-              return {
-                origin_iata: x.airport_a,
-                destination_iata: x.airport_b,
-                division_code: air.division_code,
-                weekly_departures: x.departures_per_week,
-                carriers: 1,
-                origin_lat: o.latitude,
-                origin_lon: o.longitude,
-                dest_lat: d.latitude,
-                dest_lon: d.longitude,
-                accent_color: accent,
-              } as Arc
-            })
-            .filter(Boolean) as Arc[],
-        )
-      }
-    })()
-  }, [code, slug])
-
-  if (!isConfigured) return <NotConfigured />
   /**
    * The timetable, fetched for whatever is currently selected.
    *
@@ -170,61 +102,90 @@ export default function AirlinePage() {
    * Filtering on the server instead means each scope is complete. Only the
    * unfiltered view can still hit the cap, and it now admits it.
    */
+  const ttScopeAirport = ttRoute ? ttRoute.a : ttAirport || null
+  const ttScopePair = ttRoute ? ttRoute.b : null
+  const ttKey = uid ? carrierKeys.timetable(uid, ttScopeAirport, ttScopePair) : null
+  /** A scope whose read failed, shown as empty rather than loading forever. */
+  const [ttFailed, setTtFailed] = useState<string | null>(null)
+  const timetable =
+    useHeld<TimetableRow[]>(ttKey) ?? (ttKey !== null && ttFailed === ttKey ? NO_TIMETABLE : null)
+  /** True when the unfiltered timetable came back at the server's row cap. */
+  const ttCapped = !ttAirport && !ttRoute && timetable?.length === 1000
+
+  // Up here with the other hooks on purpose. This component returns early
+  // below -- not configured, no such carrier, still loading -- so a hook
+  // called further down runs on some renders and not others, which is exactly
+  // the "rendered more hooks than during the previous render" crash.
+  const fleetPage = usePaged(fleet)
+  const routePage = usePaged(routes)
+  const timetablePage = usePaged(timetable ?? NO_TIMETABLE)
+
+  const pageKey = JSON.stringify([code, slug])
   useEffect(() => {
-    if (!isConfigured || !a) return
-    let cancelled = false
-    setTimetable(null)
-    void (async () => {
-      const { data } = await supabase.rpc('airline_timetable', {
-        p_uid: a.uid,
-        p_airport: ttRoute ? ttRoute.a : ttAirport || null,
-        p_pair_with: ttRoute ? ttRoute.b : null,
-      })
-      if (cancelled) return
-      const rows = (data as TimetableRow[]) ?? []
-      setTimetable(rows)
-      setTtCapped(!ttAirport && !ttRoute && rows.length === 1000)
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [a, ttAirport, ttRoute])
+    if (!isConfigured) return
+    setMapMode('airline')
+    setTtAirport('')
+    setTtRoute(null)
+    openCarrier(code, slug, true).catch(() => setFailed(pageKey))
+    // pageKey is code and slug.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code, slug])
+
+  useEffect(() => {
+    if (!isConfigured || !uid || !ttKey) return
+    // The unfiltered timetable is a heavy read and waits its turn behind the
+    // paragraph (lib/carrierPage.ts); a scope the visitor just picked does not.
+    const turn = ttScopeAirport ? Promise.resolve() : heavyTurn(code, slug)
+    void turn
+      .then(() => loadTimetable(uid, ttScopeAirport, ttScopePair))
+      .catch(() => setTtFailed(ttKey))
+    // ttKey is the uid and both scopes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttKey])
 
   // Fetched the first time Division mode is asked for, and kept. The whole
   // division is a much bigger draw than one carrier's routes and most visitors
   // never switch, so it does not belong in the page's initial load.
   useEffect(() => {
-    if (!isConfigured || mapMode !== 'division' || divArcs || !a) return
+    if (!isConfigured || !divKey || !divisionCode) return
     let cancelled = false
     setDivLoading(true)
-    void (async () => {
-      const { data } = await supabase.rpc('division_arcs', {
-        p_division: a.division_code,
-        p_limit: 700,
+    void load<DivisionMap>(
+      divKey,
+      async () => {
+        const list =
+          (await read<Arc[]>(
+            supabase.rpc('division_arcs', { p_division: divisionCode, p_limit: 700 }),
+          )) ?? []
+        const codes = Array.from(
+          new Set(list.flatMap((x) => [x.origin_iata, x.destination_iata])),
+        ).slice(0, 700)
+        if (codes.length === 0) return { arcs: list, nodes: [] }
+        const pts = await read<NetworkNode[]>(
+          supabase
+            .from('mv_airport_directory')
+            .select('iata_code, city_name, country_code, latitude, longitude, weekly_departures, carriers, hub_for')
+            .in('iata_code', codes),
+        )
+        return { arcs: list, nodes: (pts ?? []).filter((p) => p.latitude != null) }
+      },
+      { fresh: 30 * 60 * 1000 },
+    )
+      .catch(() => put<DivisionMap>(divKey, { arcs: [], nodes: [] }))
+      .finally(() => {
+        if (!cancelled) setDivLoading(false)
       })
-      if (cancelled) return
-      const list = (data as Arc[]) ?? []
-      setDivArcs(list)
-      const codes = Array.from(
-        new Set(list.flatMap((x) => [x.origin_iata, x.destination_iata])),
-      ).slice(0, 700)
-      if (codes.length) {
-        const { data: pts } = await supabase
-          .from('mv_airport_directory')
-          .select('iata_code, city_name, country_code, latitude, longitude, weekly_departures, carriers, hub_for')
-          .in('iata_code', codes)
-        if (!cancelled) {
-          setDivNodes(((pts as NetworkNode[]) ?? []).filter((p) => p.latitude != null))
-        }
-      }
-      if (!cancelled) setDivLoading(false)
-    })()
     return () => {
       cancelled = true
     }
-  }, [mapMode, divArcs, a])
+  }, [divKey, divisionCode])
 
-  if (missing) {
+  /** An admin's edit, read back from the profile view, becomes the carrier shown. */
+  const setA = (updated: Airline) => put(carrierKeys.profile(updated.uid), updated)
+
+  if (!isConfigured) return <NotConfigured />
+
+  if (row === null || (row === undefined && failed === pageKey)) {
     return (
       <div className="mx-auto max-w-[1180px] px-5 py-24 text-center">
         <h1 className="display text-4xl">No such carrier</h1>
@@ -391,17 +352,14 @@ export default function AirlinePage() {
                 site={site}
                 accent={accent}
                 onSaved={(s) => {
-                  setSite(s)
+                  put(carrierKeys.site(a.uid), s)
                   // website_url follows the website, so read the carrier back
                   // too: a removed website must not linger as a bare link.
-                  void (async () => {
-                    const { data } = await supabase
-                      .from('v_airline_profile')
-                      .select('*')
-                      .eq('uid', a.uid)
-                      .maybeSingle()
-                    if (data) setA(data as Airline)
-                  })()
+                  void readProfile(a.uid)
+                    .then((data) => {
+                      if (data) setA(data)
+                    })
+                    .catch(() => {})
                 }}
               />
             </div>
@@ -538,7 +496,11 @@ export default function AirlinePage() {
                   </tr>
                 ))}
                 {fleet.length === 0 && (
-                  <tr><td className="px-4 py-6 text-ink-faint" colSpan={2}>No fleet recorded.</td></tr>
+                  <tr>
+                    <td className="px-4 py-6 text-ink-faint" colSpan={2}>
+                      {fleetHeld ? 'No fleet recorded.' : 'Loading fleet…'}
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -582,7 +544,11 @@ export default function AirlinePage() {
                   )
                 })}
                 {routes.length === 0 && (
-                  <tr><td className="px-4 py-6 text-ink-faint" colSpan={4}>No routes filed.</td></tr>
+                  <tr>
+                    <td className="px-4 py-6 text-ink-faint" colSpan={4}>
+                      {routesHeld ? 'No routes filed.' : 'Loading routes…'}
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>

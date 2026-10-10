@@ -11,6 +11,7 @@ import { isConfigured, supabase } from '../lib/supabase'
 import type { Airline, Arc, Division, NetworkNode } from '../lib/types'
 import { accentOf, capitalise, num, spell } from '../lib/format'
 import { useAirportCount, useCarrierCount, useDivisionCount } from '../lib/carriers'
+import { useDivisions, useNetworkArcs, useNetworkNodes } from '../lib/data'
 
 /**
  * Identity, then the divisions, then the search — in that order, because this
@@ -37,36 +38,58 @@ async function spotlightPicks(total: number): Promise<Airline[]> {
   return rows.filter((a): a is Airline => Boolean(a))
 }
 
+/**
+ * A visit is a page load, not a mount: coming back to Home from a carrier is
+ * still the same visit, and should find the same six rather than wait for six
+ * new ones. A draw that came back empty is not kept, so it is tried again.
+ */
+let spotlightDraw: Promise<Airline[]> | null = null
+let spotlightDrawn: Airline[] = []
+
+function drawSpotlight(total: number): Promise<Airline[]> {
+  spotlightDraw ??= spotlightPicks(total).then(
+    (picks) => {
+      if (picks.length === 0) spotlightDraw = null
+      spotlightDrawn = picks
+      return picks
+    },
+    () => {
+      spotlightDraw = null
+      return []
+    },
+  )
+  return spotlightDraw
+}
+
+const NO_ARCS: Arc[] = []
+const NO_NODES: NetworkNode[] = []
+const NO_DIVISIONS: Division[] = []
+
 export default function Home() {
-  const [divisions, setDivisions] = useState<Division[]>([])
-  const [arcs, setArcs] = useState<Arc[]>([])
-  const [nodes, setNodes] = useState<NetworkNode[]>([])
-  const [spotlight, setSpotlight] = useState<Airline[]>([])
+  // Each of these lands on its own. They used to share one Promise.all, so the
+  // map, the division cards and the spotlight all waited for whichever of nine
+  // requests was slowest -- which is always v_division_summary, by seconds.
+  const divisions = useDivisions() ?? NO_DIVISIONS
+  // Each division's busiest pairs first, so the map's cap never leaves a
+  // division out -- Eos was, while its routes were all below the top 320.
+  const arcs = useNetworkArcs(900) ?? NO_ARCS
+  const nodes = useNetworkNodes(700) ?? NO_NODES
+  const [spotlight, setSpotlight] = useState<Airline[]>(spotlightDrawn)
   const carrierCount = useCarrierCount()
   const divisionCount = useDivisionCount()
   const airportCount = useAirportCount()
 
   useEffect(() => {
     if (!isConfigured) return
-    void (async () => {
-      const [d, a, n, s] = await Promise.all([
-        supabase.from('v_division_summary').select('*').order('sort_order'),
-        // Each division's busiest pairs first, so the map's cap never leaves a
-        // division out -- Eos was, while its routes were all below the top 320.
-        supabase
-          .from('mv_network_arcs')
-          .select('*')
-          .order('featured', { ascending: false })
-          .order('weekly_departures', { ascending: false })
-          .limit(900),
-        supabase.from('mv_network_nodes').select('*').limit(700),
-        spotlightPicks(carrierCount),
-      ])
-      setDivisions((d.data as Division[]) ?? [])
-      setArcs((a.data as Arc[]) ?? [])
-      setNodes((n.data as NetworkNode[]) ?? [])
-      setSpotlight(s)
-    })()
+    let cancelled = false
+    void drawSpotlight(carrierCount).then((picks) => {
+      if (!cancelled) setSpotlight(picks)
+    })
+    return () => {
+      cancelled = true
+    }
+    // Drawn once, against whatever the count is when the page opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const totals = divisions.reduce(

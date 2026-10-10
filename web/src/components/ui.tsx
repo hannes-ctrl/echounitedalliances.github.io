@@ -1,4 +1,6 @@
+import { useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
+import { prefetchCarrier, rememberAirline } from '../lib/carrierPage'
 import type { Airline } from '../lib/types'
 import { accentOf, flag, initials, num } from '../lib/format'
 import EchoMark from './EchoMark'
@@ -77,14 +79,37 @@ export function DivisionChip({
   )
 }
 
+/**
+ * How long a pointer has to rest on a card before its carrier is read ahead.
+ * Long enough that sweeping the mouse across a grid of sixty asks for none of
+ * them; short enough to be well inside the time it takes to decide to click.
+ */
+const HOVER_INTENT_MS = 90
+
 /** One carrier in a list or grid. Same object everywhere it appears. */
 export function AirlineCard({ a }: { a: Airline }) {
   const accent = accentOf(a)
+  const intent = useRef<number | undefined>(undefined)
+  const settle = () => {
+    window.clearTimeout(intent.current)
+    intent.current = window.setTimeout(() => prefetchCarrier(a), HOVER_INTENT_MS)
+  }
+  const leave = () => window.clearTimeout(intent.current)
+  useEffect(() => leave, [])
   return (
     <Link
       to={`/d/${a.division_code}/${a.airline_slug}`}
       className="panel lift group flex items-start gap-3 p-4"
       style={{ ['--card-accent' as string]: accent }}
+      // The card is the same row the carrier's header draws, so the page can
+      // open on it without asking -- and a pointer resting here, or a finger
+      // coming down, starts its fleet, routes and map before the click lands.
+      onPointerEnter={settle}
+      onPointerLeave={leave}
+      onFocus={settle}
+      onBlur={leave}
+      onTouchStart={() => prefetchCarrier(a)}
+      onClick={() => rememberAirline(a)}
     >
       <Mark airline={a} />
       <div className="min-w-0 flex-1">
